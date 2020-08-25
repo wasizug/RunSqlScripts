@@ -11,6 +11,8 @@ using System.Threading.Tasks;
 using System.Xml.Xsl;
 using CommandLine;
 
+
+
 namespace RunSqlScripts
 {
     class Program
@@ -22,9 +24,10 @@ namespace RunSqlScripts
 
         static void Main(string[] args)
         {
+        
             WriteConsoleAndLog("START RunSqlScripts");
 
-            var arguments = CommandLine.Parser.Default.ParseArguments<Options>(args);
+            var arguments = Parser.Default.ParseArguments<Options>(args);
             if (!arguments.Errors.Any())
             {
                 Init(arguments);
@@ -67,10 +70,10 @@ namespace RunSqlScripts
                 try
                 {
                     con.Open();
-                    using (var command = new SqlCommand())
+                    using (var comm = new SqlCommand())
                     {
-                        command.Connection = con;
-                        ExecuteFiles(filesToRun, command);
+                        comm.Connection = con;
+                        ExecuteFiles(filesToRun, comm);
                     }
                 }
                 catch (Exception ex)
@@ -80,7 +83,7 @@ namespace RunSqlScripts
             }
         }
 
-        private static void ExecuteFiles(Dictionary<string, bool> filesToRun, SqlCommand command)
+        private static void ExecuteFiles(Dictionary<string, bool> filesToRun, SqlCommand comm)
         {
             var filesCount = filesToRun.Count;
 
@@ -88,13 +91,15 @@ namespace RunSqlScripts
             foreach (var fileItem in filesToRun)
             {
                 currentCount++;
-                var content = File.ReadAllText(fileItem.Key, Encoding.Default);
+                var encoding = GetEncoding(fileItem.Key);
+                var content = File.ReadAllText(fileItem.Key, encoding);
                 try
                 {
-                    command.CommandText = $"USE {_args.ConnectionString["database"]}";
-                    command.ExecuteNonQuery();
+                    comm.CommandText = $"USE {_args.ConnectionString["database"]}";
+                    comm.ExecuteNonQuery();
 
-                    var scripts = SplitSqlStatements(content);
+                    content = RemoveComments(content);
+                    var scripts = RemoveGoStatement(content);
                     scripts.ToList().ForEach(script =>
                     {
                         var sql = script;
@@ -103,8 +108,8 @@ namespace RunSqlScripts
                             sql = sql.Substring(0, content.Length - 2);
                         }
 
-                        command.CommandText = sql;
-                        command.ExecuteNonQuery();
+                        comm.CommandText = sql;
+                        comm.ExecuteNonQuery();
                     });
                 }
                 catch (Exception ex)
@@ -117,8 +122,34 @@ namespace RunSqlScripts
                         break;
                     }
                 }
-                WriteConsoleAndLog($"{(int)(currentCount * 100 / (decimal)filesCount)}% {fileItem.Key}");
+                WriteConsoleAndLog($"{(int)(currentCount * 100 / (decimal)filesCount)}% {fileItem.Key} (Encoding: {encoding.BodyName})");
             }
+        }
+
+        private static string RemoveComments(string content)
+        {
+            var ret = "";
+            var startPos = 0;
+            // when failed, we return the original content:
+            try
+            {
+                while (content?.IndexOf("/*", startPos) > -1)
+                {
+                    var endPos = content.IndexOf("/*", startPos);
+                    var startPosAfterComment = content.IndexOf("*/", startPos);
+                    var contentBefore = content.Substring(startPos, endPos - startPos);
+                    var contentAfter = content.Substring(startPosAfterComment + 2);
+                    ret += $"{contentBefore}{Environment.NewLine}{contentAfter}";
+                    startPos = endPos + 1;
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteConsoleAndLog("SoftFail: ", ex.Message);
+                ret = content;
+            }
+
+            return ret;
         }
 
         private static Dictionary<string, bool> GetFilesToRun(FolderList directory, string path = null)
@@ -127,7 +158,7 @@ namespace RunSqlScripts
             var fileList = new Dictionary<string, bool>(StringComparer.InvariantCultureIgnoreCase);
             try
             {
-                Directory.GetFiles(path ?? directory.Folder, "*.sql").ToList().ForEach(file =>
+                Directory.GetFiles(path ?? directory.Folder, "*.sql").OrderBy(Path.GetFileNameWithoutExtension).ToList().ForEach(file =>
                 {
                     fileList.Add(file, directory.StopOnError);
                 });
@@ -347,20 +378,32 @@ namespace RunSqlScripts
               });
         }
 
-        private static IEnumerable<string> SplitSqlStatements(string sqlScript)
+        private static List<string> RemoveGoStatement(string sqlScript)
         {
-            // Split by "GO" statements
-            var statements = Regex.Split(
-                sqlScript,
-                @"[(\n\r)\t ]GO[(\n\r)\t ]",
-                RegexOptions.Multiline |
-                RegexOptions.IgnorePatternWhitespace |
-                RegexOptions.IgnoreCase);
+            var statements = Regex.Split(sqlScript, @"[(\n\r)\t ]GO[(\n\r)\t ]", RegexOptions.IgnorePatternWhitespace | RegexOptions.IgnoreCase | RegexOptions.Multiline);
+            return statements.Where(stat => !string.IsNullOrWhiteSpace(stat)).Select(stat => stat.Trim(' ', '\r', '\n')).ToList();
+        }
 
-            // Remove empties, trim, and return
-            return statements
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Select(x => x.Trim(' ', '\r', '\n'));
+        public static Encoding GetEncoding(string filename)
+        {
+            // Read the BOM
+            var bom = new byte[4];
+            using (var file = new FileStream(filename, FileMode.Open, FileAccess.Read))
+            {
+                file.Read(bom, 0, 4);
+            }
+
+            // Analyze the BOM
+            if (bom[0] == 0x2b && bom[1] == 0x2f && bom[2] == 0x76) return Encoding.UTF7;
+            if (bom[0] == 0xef && bom[1] == 0xbb && bom[2] == 0xbf) return Encoding.UTF8;
+            if (bom[0] == 0xff && bom[1] == 0xfe && bom[2] == 0 && bom[3] == 0) return Encoding.UTF32; //UTF-32LE
+            if (bom[0] == 0xff && bom[1] == 0xfe) return Encoding.Unicode; //UTF-16LE
+            if (bom[0] == 0xfe && bom[1] == 0xff) return Encoding.BigEndianUnicode; //UTF-16BE
+            if (bom[0] == 0 && bom[1] == 0 && bom[2] == 0xfe && bom[3] == 0xff) return new UTF32Encoding(true, true);  //UTF-32BE
+
+            // We actually have no idea what the encoding is if we reach this point, so
+            // you may wish to return null instead of defaulting to ASCII
+            return Encoding.Default;
         }
 
     }
