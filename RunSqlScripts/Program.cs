@@ -91,7 +91,7 @@ namespace RunSqlScripts
             foreach (var fileItem in filesToRun)
             {
                 currentCount++;
-                var encoding = GetEncoding(fileItem.Key);
+                var encoding = GetEncodingWithBom(fileItem.Key);
                 var content = File.ReadAllText(fileItem.Key, encoding);
                 try
                 {
@@ -384,7 +384,7 @@ namespace RunSqlScripts
             return statements.Where(stat => !string.IsNullOrWhiteSpace(stat)).Select(stat => stat.Trim(' ', '\r', '\n')).ToList();
         }
 
-        public static Encoding GetEncoding(string filename)
+        public static Encoding GetEncodingWithBom(string filename)
         {
             // Read the BOM
             var bom = new byte[4];
@@ -402,7 +402,7 @@ namespace RunSqlScripts
             if (bom[0] == 0 && bom[1] == 0 && bom[2] == 0xfe && bom[3] == 0xff) return new UTF32Encoding(true, true);  //UTF-32BE
 
             // We actually have no idea what the encoding is if we reach this point, so
-            // you may wish to return null instead of defaulting to ASCII
+            // you may wish to return null instead of defaulting to DEFAULT
             return Encoding.Default;
         }
 
